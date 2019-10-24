@@ -55,7 +55,7 @@ static volatile uint8_t buffer[BUFFER_SIZE];
 static volatile uint8_t head, tail;
 static uint8_t DataPin;
 static uint8_t CharBuffer=0;
-static uint8_t UTF8next=0;
+static uint8_t UTF8next[4] = { 0 };
 static const PS2Keymap_t *keymap=NULL;
 
 // The ISR for the external interrupt
@@ -473,6 +473,7 @@ const PROGMEM PS2Keymap_t PS2Keymap_JP = {
 #define SHIFT_L   0x04
 #define SHIFT_R   0x08
 #define ALTGR     0x10
+#define CTRL_L    0x20
 
 static char get_iso8859_code(void)
 {
@@ -495,6 +496,8 @@ static char get_iso8859_code(void)
 					state &= ~SHIFT_R;
 				} else if (s == 0x11 && (state & MODIFIER)) {
 					state &= ~ALTGR;
+				} else if (s == 0x14) {
+					state &= ~CTRL_L;
 				}
 				// CTRL, ALT & WIN keys could be added
 				// but is that really worth the overhead?
@@ -509,6 +512,8 @@ static char get_iso8859_code(void)
 				continue;
 			} else if (s == 0x11 && (state & MODIFIER)) {
 				state |= ALTGR;
+			} else if (s == 0x14) {
+				state |= CTRL_L;
 			}
 			c = 0;
 			if (state & MODIFIER) {
@@ -533,6 +538,13 @@ static char get_iso8859_code(void)
 			} else if (state & (SHIFT_L | SHIFT_R)) {
 				if (s < PS2_KEYMAP_SIZE)
 					c = pgm_read_byte(keymap->shift + s);
+			} else if (state & CTRL_L) {
+				if (s < PS2_KEYMAP_SIZE) {
+					c = pgm_read_byte(keymap->shift + s);
+					if (c >= 'A' && c <= 'Z') {
+						c = c + 1 - 'A'; // Ctrl A..Z returns char code 0x01..0x1A
+					}
+				}
 			} else {
 				if (s < PS2_KEYMAP_SIZE)
 					c = pgm_read_byte(keymap->noshift + s);
@@ -544,7 +556,7 @@ static char get_iso8859_code(void)
 }
 
 bool PS2Keyboard::available() {
-	if (CharBuffer || UTF8next) return true;
+	if (CharBuffer || UTF8next[0]) return true;
 	CharBuffer = get_iso8859_code();
 	if (CharBuffer) return true;
 	return false;
@@ -552,7 +564,7 @@ bool PS2Keyboard::available() {
 
 void PS2Keyboard::clear() {
 	CharBuffer = 0;
-	UTF8next = 0;
+	UTF8next[0] = 0;
 }
 
 uint8_t PS2Keyboard::readScanCode(void)
@@ -563,9 +575,12 @@ uint8_t PS2Keyboard::readScanCode(void)
 int PS2Keyboard::read() {
 	uint8_t result;
 
-	result = UTF8next;
+	result = UTF8next[0];
 	if (result) {
-		UTF8next = 0;
+		// shift bytes (seems inefficient)
+		UTF8next[0] = UTF8next[1];
+		UTF8next[1] = UTF8next[2];
+		UTF8next[2] = UTF8next[3];
 	} else {
 		result = CharBuffer;
 		if (result) {
@@ -573,8 +588,23 @@ int PS2Keyboard::read() {
 		} else {
 			result = get_iso8859_code();
 		}
-		if (result >= 128) {
-			UTF8next = (result & 0x3F) | 0x80;
+		if (result >= 0x80 && result <= 0x9F) {
+			// handles special chars into ESC sequeces.
+			if (result >= 0x8A && result <= 0x8D) {
+				// cursor
+				UTF8next[0] = '[';
+				UTF8next[1] = result - 0x8A + 'A';
+				UTF8next[2] = 0;
+
+				result = 0x1b; // ESC
+			}
+			else {
+				result = 0;
+			}
+		} else
+		if (result >= 0xA0) {
+			UTF8next[0] = (result & 0x3F) | 0x80;
+			UTF8next[1] = 0;
 			result = ((result >> 6) & 0x1F) | 0xC0;
 		}
 	}
@@ -588,7 +618,7 @@ int PS2Keyboard::readUnicode() {
 	result = CharBuffer;
 	if (!result) result = get_iso8859_code();
 	if (!result) return -1;
-	UTF8next = 0;
+	UTF8next[0] = 0;
 	CharBuffer = 0;
 	return result;
 }
